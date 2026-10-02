@@ -46,9 +46,21 @@ export CFLAGS=-flto=thin
 export CXXFLAGS=-flto=thin
 export LDFLAGS=-flto=thin
 
+# Desktop / Developer ID DMG is the default (no App Sandbox entitlements).
+# TWILIGHT_MAS=1 selects CONFIG+=twilight-mas: sandbox entitlements and
+# bundle id com.henrique.twilight. This does not upload or submit a build.
+QMAKE_CONFIG_ARGS=
+if [ "${TWILIGHT_MAS:-}" = "1" ]; then
+  echo "TWILIGHT_MAS=1: CONFIG+=twilight-mas"
+  echo "Hardened Runtime: codesign --options runtime"
+  echo "Entitlements: app/deploy/macos/Twilight-MAS.entitlements"
+  echo "This does not submit anything to App Store review."
+  QMAKE_CONFIG_ARGS="CONFIG+=twilight-mas"
+fi
+
 echo Configuring the project
 pushd $BUILD_FOLDER
-qmake $SOURCE_ROOT/moonlight-qt.pro QMAKE_APPLE_DEVICE_ARCHS="x86_64 arm64" || fail "Qmake failed!"
+qmake $SOURCE_ROOT/moonlight-qt.pro QMAKE_APPLE_DEVICE_ARCHS="x86_64 arm64" $QMAKE_CONFIG_ARGS || fail "Qmake failed!"
 popd
 
 echo Compiling Moonlight in $BUILD_CONFIG configuration
@@ -73,7 +85,17 @@ find $BUILD_FOLDER/app/Moonlight.app/ -name '*.dSYM' | xargs rm -rf
 
 if [ "$SIGNING_IDENTITY" != "" ]; then
   echo Signing app bundle
-  codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" $BUILD_FOLDER/app/Moonlight.app || fail "Signing failed!"
+  if [ "${TWILIGHT_MAS:-}" = "1" ]; then
+    # Hardened Runtime (--options runtime) plus the Mac App Store entitlements.
+    # Omit --deep once nested helpers are signed individually; --deep matches
+    # the existing Developer ID invocation below.
+    codesign --force --deep --options runtime --timestamp \
+      --entitlements "$SOURCE_ROOT/app/deploy/macos/Twilight-MAS.entitlements" \
+      --sign "$SIGNING_IDENTITY" \
+      $BUILD_FOLDER/app/Moonlight.app || fail "Signing failed!"
+  else
+    codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" $BUILD_FOLDER/app/Moonlight.app || fail "Signing failed!"
+  fi
 fi
 
 echo Creating DMG
@@ -88,7 +110,10 @@ else
   esac
 fi
 
-if [ "$NOTARY_KEYCHAIN_PROFILE" != "" ]; then
+# Developer ID notarization of the DMG. Skip it for TWILIGHT_MAS so a
+# sandbox-signed bundle is not sent through the notary service from this script.
+# Notarization is not App Store review, and this script never submits for review.
+if [ "$NOTARY_KEYCHAIN_PROFILE" != "" ] && [ "${TWILIGHT_MAS:-}" != "1" ]; then
   echo Uploading to App Notary service
   xcrun notarytool submit --keychain-profile "$NOTARY_KEYCHAIN_PROFILE" --wait $INSTALLER_FOLDER/Moonlight.dmg || fail "Notary submission failed"
 
